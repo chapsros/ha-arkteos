@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure your Arkteos Heat Pump",
+        "description": "Enter the IP address and port of your Arkteos heat pump (Zuran 3 / REG3).",
+        "data": {
+          "host": "Heat pump IP address",
+          "port": "Port (default: 9641)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the heat pump. Check the IP and port.",
+      "unknown": "Unknown error. Check the logs."
+    },
+    "abort": {
+      "already_configured": "This heat pump is already configured."
+    }
+  }
+}

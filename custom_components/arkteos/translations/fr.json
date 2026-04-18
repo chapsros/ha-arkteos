@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurer votre PAC Arkteos",
+        "description": "Entrez l'adresse IP et le port de votre pompe à chaleur Arkteos (Zuran 3 / REG3).",
+        "data": {
+          "host": "Adresse IP de la PAC",
+          "port": "Port (défaut: 9641)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter à la PAC. Vérifiez l'IP et le port.",
+      "unknown": "Erreur inconnue. Consultez les logs."
+    },
+    "abort": {
+      "already_configured": "Cette PAC est déjà configurée."
+    }
+  }
+}
