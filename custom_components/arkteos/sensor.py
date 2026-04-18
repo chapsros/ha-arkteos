@@ -1,16 +1,15 @@
-"""Capteurs de température Arkteos."""
+"""Sensors V2 - Capteurs Arkteos avec auto-découverte."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorEntityDescription,
-    SensorStateClass,
+    SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import (
+    UnitOfTemperature, UnitOfPressure, PERCENTAGE,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -20,28 +19,14 @@ from .protocol import ArkteosProtocol, ArkteosData
 
 
 @dataclass
-class ArtkteosSensorDescription(SensorEntityDescription):
+class ArtkteosSensorDesc(SensorEntityDescription):
     value_fn: Callable[[ArkteosData], Optional[float]] = lambda d: None
+    condition_fn: Callable[[ArkteosData], bool] = lambda d: True
 
 
-SENSORS: tuple[ArtkteosSensorDescription, ...] = (
-    ArtkteosSensorDescription(
-        key="temp_eau_depart",
-        name="Température départ circuit",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_eau_depart,
-    ),
-    ArtkteosSensorDescription(
-        key="temp_eau_retour",
-        name="Température retour circuit",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_eau_retour,
-    ),
-    ArtkteosSensorDescription(
+# Capteurs toujours présents
+BASE_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    ArtkteosSensorDesc(
         key="temp_exterieure",
         name="Température extérieure",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -49,15 +34,23 @@ SENSORS: tuple[ArtkteosSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.temp_exterieure,
     ),
-    ArtkteosSensorDescription(
-        key="temp_ballon_ecs",
-        name="Température ballon ECS",
+    ArtkteosSensorDesc(
+        key="temp_retour_circuit",
+        name="Température retour circuit",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_ballon_ecs,
+        value_fn=lambda d: d.temp_retour_circuit,
     ),
-    ArtkteosSensorDescription(
+    ArtkteosSensorDesc(
+        key="pression",
+        name="Pression circuit",
+        native_unit_of_measurement="bar",
+        device_class=SensorDeviceClass.PRESSURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.pression,
+    ),
+    ArtkteosSensorDesc(
         key="temp_condenseur",
         name="Température condenseur",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -65,7 +58,7 @@ SENSORS: tuple[ArtkteosSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.temp_condenseur,
     ),
-    ArtkteosSensorDescription(
+    ArtkteosSensorDesc(
         key="temp_evaporateur",
         name="Température évaporateur",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -73,7 +66,7 @@ SENSORS: tuple[ArtkteosSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.temp_evaporateur,
     ),
-    ArtkteosSensorDescription(
+    ArtkteosSensorDesc(
         key="temp_refoulement",
         name="Température refoulement",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -81,39 +74,102 @@ SENSORS: tuple[ArtkteosSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.temp_refoulement,
     ),
-    ArtkteosSensorDescription(
-        key="temp_zone1",
-        name="Température zone 1",
+)
+
+# Capteurs zone radiateur (si détecté)
+RADIATEUR_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    ArtkteosSensorDesc(
+        key="radiateur_temp_ambiante",
+        name="Radiateur - Température ambiante",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_zone1,
+        value_fn=lambda d: d.radiateur.temp_ambiante,
+        condition_fn=lambda d: d.radiateur.present,
     ),
-    ArtkteosSensorDescription(
-        key="temp_zone2",
-        name="Température zone 2",
+    ArtkteosSensorDesc(
+        key="radiateur_consigne",
+        name="Radiateur - Consigne",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_zone2,
-    ),
-    ArtkteosSensorDescription(
-        key="temp_depart_plancher",
-        name="Température départ plancher",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_depart_plancher,
-    ),
-    ArtkteosSensorDescription(
-        key="temp_retour_plancher",
-        name="Température retour plancher",
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: d.temp_retour_plancher,
+        value_fn=lambda d: d.radiateur.temp_consigne,
+        condition_fn=lambda d: d.radiateur.present,
     ),
 )
+
+# Capteurs zone plancher (si détecté)
+PLANCHER_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    ArtkteosSensorDesc(
+        key="plancher_temp_ambiante",
+        name="Plancher - Température ambiante",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.plancher.temp_ambiante,
+        condition_fn=lambda d: d.plancher.present,
+    ),
+    ArtkteosSensorDesc(
+        key="plancher_consigne",
+        name="Plancher - Consigne",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.plancher.temp_consigne,
+        condition_fn=lambda d: d.plancher.present,
+    ),
+    ArtkteosSensorDesc(
+        key="plancher_depart",
+        name="Plancher - Température départ",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.depart_plancher,
+        condition_fn=lambda d: d.plancher.present,
+    ),
+    ArtkteosSensorDesc(
+        key="plancher_retour",
+        name="Plancher - Température retour",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.retour_plancher,
+        condition_fn=lambda d: d.plancher.present,
+    ),
+)
+
+# Capteurs ECS (si détecté)
+ECS_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    ArtkteosSensorDesc(
+        key="ecs_temp",
+        name="Chauffe-eau - Température",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.ecs.temp_actuelle,
+        condition_fn=lambda d: d.ecs.present,
+    ),
+    ArtkteosSensorDesc(
+        key="ecs_consigne",
+        name="Chauffe-eau - Consigne",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.ecs.temp_consigne,
+        condition_fn=lambda d: d.ecs.present,
+    ),
+    ArtkteosSensorDesc(
+        key="ecs_relance",
+        name="Chauffe-eau - Température relance",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.ecs.temp_relance,
+        condition_fn=lambda d: d.ecs.present,
+    ),
+)
+
+ALL_SENSORS = BASE_SENSORS + RADIATEUR_SENSORS + PLANCHER_SENSORS + ECS_SENSORS
 
 
 async def async_setup_entry(
@@ -122,21 +178,20 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     protocol: ArkteosProtocol = hass.data[DOMAIN][entry.entry_id]
+    # On crée tous les capteurs, ils se masquent si la zone n'est pas présente
     async_add_entities(
-        ArtkteosSensor(protocol, entry, desc) for desc in SENSORS
+        ArtkteosSensor(protocol, entry, desc) for desc in ALL_SENSORS
     )
 
 
 class ArtkteosSensor(SensorEntity):
-    """Capteur de température Arkteos."""
-
     _attr_has_entity_name = True
 
     def __init__(
         self,
         protocol: ArkteosProtocol,
         entry: ConfigEntry,
-        description: ArtkteosSensorDescription,
+        description: ArtkteosSensorDesc,
     ) -> None:
         self.entity_description = description
         self._protocol = protocol
@@ -160,7 +215,10 @@ class ArtkteosSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
-        return self._protocol.data.available
+        return (
+            self._protocol.data.available
+            and self.entity_description.condition_fn(self._protocol.data)
+        )
 
     @property
     def native_value(self) -> float | None:
