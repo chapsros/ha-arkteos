@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure your Arkteos Heat Pump",
+        "data": {
+          "host": "Heat pump IP address",
+          "port": "Port (default: 9641)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the heat pump.",
+      "unknown": "Unknown error."
+    },
+    "abort": {
+      "already_configured": "This heat pump is already configured."
+    }
+  }
+}
