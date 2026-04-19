@@ -1,10 +1,11 @@
-"""Intégration Arkteos V2."""
+"""Intégration Arkteos V4."""
 from __future__ import annotations
 import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
 from .protocol import ArkteosProtocol, DEFAULT_PORT
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await protocol.start()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = protocol
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_setup_services(hass)
     return True
 
 

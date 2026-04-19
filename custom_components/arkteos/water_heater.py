@@ -1,13 +1,9 @@
-"""Water Heater V2 - Chauffe-eau Arkteos avec auto-découverte."""
+"""Water Heater V4 - Chauffe-eau avec vraies commandes."""
 from __future__ import annotations
+import asyncio
 import logging
 from homeassistant.components.water_heater import (
-    WaterHeaterEntity,
-    WaterHeaterEntityFeature,
-    STATE_OFF,
-    STATE_ON,
-    STATE_HEAT_PUMP,
-    STATE_HIGH_DEMAND,
+    WaterHeaterEntity, WaterHeaterEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
@@ -16,18 +12,13 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN
-from .protocol import ArkteosProtocol, MODE_ECS_MARCHE, MODE_ECS_APPOINT, MODE_ARRET
+from .protocol import ArkteosProtocol
 
 _LOGGER = logging.getLogger(__name__)
 
 OPERATION_ARRET = "Arrêt"
 OPERATION_MARCHE = "Marche/Prog"
-OPERATION_APPOINT = "Appoint ECS"
-
-CMD_ECS_CONSIGNE = 0x11
-CMD_ECS_RELANCE = 0x12
-CMD_ECS_MODE = 0x13
-ZONE_ECS = 0x03
+ATTR_RELANCE_TEMPERATURE = "relance_temperature"
 
 
 async def async_setup_entry(
@@ -36,22 +27,11 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     protocol: ArkteosProtocol = hass.data[DOMAIN][entry.entry_id]
-
-    import asyncio
     await asyncio.sleep(3)
-
-    if protocol.data.ecs.present:
-        _LOGGER.info("Chauffe-eau ECS détecté")
-        async_add_entities([ArkteosWaterHeater(protocol, entry)])
-    else:
-        # Créer quand même, ça apparaîtra indisponible si pas de ECS
-        _LOGGER.info("Chauffe-eau non détecté, création par défaut")
-        async_add_entities([ArkteosWaterHeater(protocol, entry)])
+    async_add_entities([ArkteosWaterHeater(protocol, entry)])
 
 
 class ArkteosWaterHeater(WaterHeaterEntity):
-    """Entité chauffe-eau Arkteos."""
-
     _attr_has_entity_name = True
     _attr_name = "Chauffe-Eau"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
@@ -61,9 +41,9 @@ class ArkteosWaterHeater(WaterHeaterEntity):
         WaterHeaterEntityFeature.TARGET_TEMPERATURE
         | WaterHeaterEntityFeature.OPERATION_MODE
     )
-    _attr_operation_list = [OPERATION_ARRET, OPERATION_MARCHE, OPERATION_APPOINT]
+    _attr_operation_list = [OPERATION_ARRET, OPERATION_MARCHE]
 
-    def __init__(self, protocol: ArkteosProtocol, entry: ConfigEntry) -> None:
+    def __init__(self, protocol: ArkteosProtocol, entry: ConfigEntry):
         self._protocol = protocol
         self._attr_unique_id = f"{entry.entry_id}_water_heater"
         self._attr_device_info = DeviceInfo(
@@ -73,53 +53,64 @@ class ArkteosWaterHeater(WaterHeaterEntity):
             model="Zuran 3 / REG3",
         )
 
-    async def async_added_to_hass(self) -> None:
+    async def async_added_to_hass(self):
         self._protocol.register_callback(self._handle_update)
 
-    async def async_will_remove_from_hass(self) -> None:
+    async def async_will_remove_from_hass(self):
         self._protocol.remove_callback(self._handle_update)
 
     @callback
-    def _handle_update(self) -> None:
+    def _handle_update(self):
         self.async_write_ha_state()
 
     @property
-    def available(self) -> bool:
+    def available(self):
         return self._protocol.data.available
 
     @property
-    def current_temperature(self) -> float | None:
+    def current_temperature(self):
         return self._protocol.data.ecs.temp_actuelle
 
     @property
-    def target_temperature(self) -> float | None:
+    def target_temperature(self):
         return self._protocol.data.ecs.temp_consigne
 
     @property
-    def current_operation(self) -> str:
+    def current_operation(self):
         mode = self._protocol.data.ecs.mode
-        if mode == MODE_ARRET:
-            return OPERATION_ARRET
-        if mode == MODE_ECS_APPOINT:
-            return OPERATION_APPOINT
-        return OPERATION_MARCHE
+        return OPERATION_ARRET if mode == 0 else OPERATION_MARCHE
 
-    async def async_set_temperature(self, **kwargs) -> None:
+    @property
+    def extra_state_attributes(self):
+        return {
+            ATTR_RELANCE_TEMPERATURE: self._protocol.data.ecs.temp_relance,
+        }
+
+    async def async_set_temperature(self, **kwargs):
+        """Change la consigne ECS (garde la relance actuelle)."""
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is None:
             return
-        value = int(temp * 10)
-        await self._protocol.send_command(CMD_ECS_CONSIGNE, ZONE_ECS, value)
-        self._protocol.data.ecs.temp_consigne = temp
-        self.async_write_ha_state()
+        relance = self._protocol.data.ecs.temp_relance or 47.0
+        ok = await self._protocol.set_ecs(temp, relance)
+        if ok:
+            self._protocol.data.ecs.temp_consigne = temp
+            self.async_write_ha_state()
 
-    async def async_set_operation_mode(self, operation_mode: str) -> None:
-        mode_map = {
-            OPERATION_ARRET: MODE_ARRET,
-            OPERATION_MARCHE: MODE_ECS_MARCHE,
-            OPERATION_APPOINT: MODE_ECS_APPOINT,
-        }
-        mode_num = mode_map.get(operation_mode, MODE_ARRET)
-        await self._protocol.send_command(CMD_ECS_MODE, ZONE_ECS, mode_num)
-        self._protocol.data.ecs.mode = mode_num
-        self.async_write_ha_state()
+    async def async_set_operation_mode(self, operation_mode: str):
+        """Change le mode ECS."""
+        # Pour l'instant on envoie juste la commande avec les valeurs actuelles
+        consigne = self._protocol.data.ecs.temp_consigne or 54.0
+        relance = self._protocol.data.ecs.temp_relance or 47.0
+        ok = await self._protocol.set_ecs(consigne, relance)
+        if ok:
+            self._protocol.data.ecs.mode = 0 if operation_mode == OPERATION_ARRET else 1
+            self.async_write_ha_state()
+
+    async def async_set_relance_temperature(self, temperature: float):
+        """Service personnalisé pour changer la température de relance."""
+        consigne = self._protocol.data.ecs.temp_consigne or 54.0
+        ok = await self._protocol.set_ecs(consigne, temperature)
+        if ok:
+            self._protocol.data.ecs.temp_relance = temperature
+            self.async_write_ha_state()

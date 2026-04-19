@@ -1,4 +1,4 @@
-"""Arkteos REG3 protocol - V3."""
+"""Arkteos REG3 protocol - V4 avec commandes réelles."""
 from __future__ import annotations
 import asyncio
 import logging
@@ -18,13 +18,21 @@ FRAME_SIZE_227 = 227
 FRAME_SIZE_163 = 163
 FRAME_SIZE_95 = 95
 
+# Zones
+ZONE_RADIATEUR = 0x00
+ZONE_PLANCHER = 0x01
+ZONE_ECS = 0x09
+
+# Modes
 MODE_ARRET = 0
-MODE_CHAUD = 1
-MODE_AUTO = 2
-MODE_HORS_GEL = 3
-MODE_APPOINT = 4
-MODE_ECS_MARCHE = 1
-MODE_ECS_APPOINT = 2
+MODE_MARCHE = 1
+
+# Templates de commandes capturées depuis l'app officielle
+# Format 31 octets : 55 00 18 ff e7 40 04 01 10 [zone] 10 00 [mode] 00 aa 00 [consigne_lo] 00 [hors_gel_lo] 00 [min_lo] 00 [max_lo] 00 [default_lo] 00 [crc_lo] [crc_hi] aa
+CMD_ZONE_TEMPLATE_RAD = bytearray.fromhex('550018ffe7400401100010000100aa00b400be0064003c00c800b4003dd1aa')
+CMD_ZONE_TEMPLATE_PLA = bytearray.fromhex('550018ffe7400401100110000100be00be00cd0064003c00c800b400fe05aa')
+# Format ECS 31 octets: zone=0x09, off16-17=consigne, off20-21=relance
+CMD_ECS_TEMPLATE = bytearray.fromhex('550018ffe7400401100910000201000020020000e001d0022502250298c1aa')
 
 
 @dataclass
@@ -49,8 +57,6 @@ class ArkteosData:
     radiateur: ZoneData = field(default_factory=ZoneData)
     plancher: ZoneData = field(default_factory=ZoneData)
     ecs: ECSData = field(default_factory=ECSData)
-
-    # Températures globales
     temp_exterieure: Optional[float] = None
     temp_retour_circuit: Optional[float] = None
     pression: Optional[float] = None
@@ -61,16 +67,10 @@ class ArkteosData:
     retour_plancher: Optional[float] = None
     mode_global: Optional[int] = None
     marche: bool = False
-
-    # Énergie - puissance instantanée en W
     puissance_w: Optional[float] = None
-    # Énergie cumulée en kWh (total_increasing pour dashboard Énergie HA)
     energie_kwh: float = 0.0
-
-    # Internes pour calcul énergie
     _cpt_prev: Optional[int] = None
     _t_prev: Optional[float] = None
-
     available: bool = False
 
 
@@ -91,13 +91,11 @@ def _plausible(val: Optional[float], lo: float = 5.0, hi: float = 90.0) -> bool:
 def decode_frame_227(data: bytes, r: ArkteosData, now: float) -> None:
     if len(data) < FRAME_SIZE_227:
         return
-
     r.temp_exterieure = _s16(data, 58)
     r.temp_retour_circuit = _s16(data, 110)
     r.temp_condenseur = _s16(data, 110)
     r.temp_evaporateur = _s16(data, 119)
     r.temp_refoulement = _s16(data, 142)
-
     raw_p = data[46] | (data[47] << 8)
     r.pression = round(raw_p / 10.0, 1) if 0 < raw_p < 50 else None
 
@@ -117,22 +115,18 @@ def decode_frame_227(data: bytes, r: ArkteosData, now: float) -> None:
 
     r.marche = data[8] != 0
 
-    # --- Calcul puissance & énergie via compteur off156 ---
-    # off156 : compteur 8 bits, unité = 0.1 Wh, s'incrémente de ~3 toutes les 3s
+    # Puissance via compteur off156 (0.1 Wh/incrément, ~3s entre trames)
     cpt = data[156]
     if r._cpt_prev is not None and r._t_prev is not None:
         delta = cpt - r._cpt_prev
         if delta < 0:
-            delta += 256  # overflow uint8
+            delta += 256
         dt = now - r._t_prev
         if 0 < delta <= 20 and 1.0 <= dt <= 15.0:
-            # Puissance instantanée en W
             r.puissance_w = round((delta * 0.1 * 3600.0) / dt, 1)
-            # Énergie cumulée en kWh (total_increasing)
             r.energie_kwh = round(r.energie_kwh + (delta * 0.1 / 1000.0), 4)
         elif delta == 0:
             r.puissance_w = 0.0
-
     r._cpt_prev = cpt
     r._t_prev = now
 
@@ -140,9 +134,7 @@ def decode_frame_227(data: bytes, r: ArkteosData, now: float) -> None:
 def decode_frame_163(data: bytes, r: ArkteosData) -> None:
     if len(data) < FRAME_SIZE_163:
         return
-
     r.mode_global = data[8]
-
     c_rad = _s16(data, 24)
     c_pla = _s16(data, 50)
     c_ecs = _s16(data, 40)
@@ -160,9 +152,9 @@ def decode_frame_163(data: bytes, r: ArkteosData) -> None:
         r.ecs.temp_relance = c_rel
 
     mode = data[8]
-    r.radiateur.mode = MODE_ARRET if mode == 0 else MODE_AUTO
-    r.plancher.mode = MODE_ARRET if mode == 0 else MODE_AUTO
-    r.ecs.mode = MODE_ARRET if mode == 0 else MODE_ECS_MARCHE
+    r.radiateur.mode = MODE_ARRET if mode == 0 else MODE_MARCHE
+    r.plancher.mode = MODE_ARRET if mode == 0 else MODE_MARCHE
+    r.ecs.mode = MODE_ARRET if mode == 0 else MODE_MARCHE
 
 
 def find_frame(buf: bytes) -> tuple[bytes | None, bytes]:
@@ -179,14 +171,47 @@ def find_frame(buf: bytes) -> tuple[bytes | None, bytes]:
     return None, buf
 
 
-def build_command(cmd_type: int, zone: int, value: int) -> bytes:
-    return bytes([
-        FRAME_HEADER, 0x00, 0x10, 0xff,
-        0x23, 0x40, 0x03,
-        cmd_type, zone,
-        value & 0xff, (value >> 8) & 0xff,
-        0x00, FRAME_FOOTER,
-    ])
+def build_zone_command(zone: int, mode: int, consigne: float) -> bytes:
+    """
+    Construit une commande de zone (radiateur ou plancher).
+    Basé sur les trames capturées depuis l'app officielle.
+    zone: ZONE_RADIATEUR=0x00 ou ZONE_PLANCHER=0x01
+    mode: MODE_MARCHE=1 ou MODE_ARRET=0
+    consigne: température en °C (ex: 19.0)
+    """
+    if zone == ZONE_PLANCHER:
+        cmd = bytearray(CMD_ZONE_TEMPLATE_PLA)
+    else:
+        cmd = bytearray(CMD_ZONE_TEMPLATE_RAD)
+
+    # off[9] = zone
+    cmd[9] = zone
+    # off[12] = mode (0=arrêt, 1=marche)
+    cmd[12] = mode
+    # off[16] = consigne low byte (temp * 10)
+    consigne_raw = int(round(consigne * 10))
+    cmd[16] = consigne_raw & 0xff
+    cmd[17] = (consigne_raw >> 8) & 0xff
+    # Note: off[28-29] = checksum non recalculé (la PAC l'accepte quand même)
+    return bytes(cmd)
+
+
+def build_ecs_command(consigne: float, relance: float) -> bytes:
+    """
+    Construit une commande ECS.
+    consigne: température de consigne en °C (ex: 54.4)
+    relance: température de relance en °C (ex: 47.9)
+    """
+    cmd = bytearray(CMD_ECS_TEMPLATE)
+    # off[16-17] = consigne ECS * 10
+    c_raw = int(round(consigne * 10))
+    cmd[16] = c_raw & 0xff
+    cmd[17] = (c_raw >> 8) & 0xff
+    # off[20-21] = relance ECS * 10
+    r_raw = int(round(relance * 10))
+    cmd[20] = r_raw & 0xff
+    cmd[21] = (r_raw >> 8) & 0xff
+    return bytes(cmd)
 
 
 class ArkteosProtocol:
@@ -222,15 +247,27 @@ class ArkteosProtocol:
             self._task.cancel()
         await self._disconnect()
 
-    async def send_command(self, cmd_type: int, zone: int, value: int) -> bool:
+    async def set_zone(self, zone: int, mode: int, consigne: float) -> bool:
+        """Change le mode et la consigne d'une zone (radiateur ou plancher)."""
+        cmd = build_zone_command(zone, mode, consigne)
+        return await self._send(cmd)
+
+    async def set_ecs(self, consigne: float, relance: float) -> bool:
+        """Change les consignes du chauffe-eau."""
+        cmd = build_ecs_command(consigne, relance)
+        return await self._send(cmd)
+
+    async def _send(self, cmd: bytes) -> bool:
         if not self._writer:
+            _LOGGER.warning("Impossible d'envoyer: pas connecté")
             return False
         try:
-            self._writer.write(build_command(cmd_type, zone, value))
+            self._writer.write(cmd)
             await self._writer.drain()
+            _LOGGER.debug("Commande envoyée: %s", cmd.hex())
             return True
         except Exception as e:
-            _LOGGER.error("Erreur commande: %s", e)
+            _LOGGER.error("Erreur envoi commande: %s", e)
             return False
 
     async def _connect(self) -> bool:
