@@ -1,4 +1,4 @@
-"""Sensors V2 - Capteurs Arkteos avec auto-découverte."""
+"""Sensors V3 - avec puissance et énergie compatibles dashboard Énergie HA."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -7,15 +7,15 @@ from homeassistant.components.sensor import (
     SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    UnitOfTemperature, UnitOfPressure, PERCENTAGE,
-)
+from homeassistant.const import UnitOfTemperature, UnitOfPower, UnitOfEnergy
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import DOMAIN
 from .protocol import ArkteosProtocol, ArkteosData
+
+DEVICE_INFO_KEY = "device_info"
 
 
 @dataclass
@@ -24,8 +24,8 @@ class ArtkteosSensorDesc(SensorEntityDescription):
     condition_fn: Callable[[ArkteosData], bool] = lambda d: True
 
 
-# Capteurs toujours présents
-BASE_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+ALL_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    # --- Températures globales ---
     ArtkteosSensorDesc(
         key="temp_exterieure",
         name="Température extérieure",
@@ -74,12 +74,9 @@ BASE_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.temp_refoulement,
     ),
-)
-
-# Capteurs zone radiateur (si détecté)
-RADIATEUR_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    # --- Radiateur ---
     ArtkteosSensorDesc(
-        key="radiateur_temp_ambiante",
+        key="radiateur_temp",
         name="Radiateur - Température ambiante",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -96,12 +93,9 @@ RADIATEUR_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
         value_fn=lambda d: d.radiateur.temp_consigne,
         condition_fn=lambda d: d.radiateur.present,
     ),
-)
-
-# Capteurs zone plancher (si détecté)
-PLANCHER_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    # --- Plancher ---
     ArtkteosSensorDesc(
-        key="plancher_temp_ambiante",
+        key="plancher_temp",
         name="Plancher - Température ambiante",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -120,7 +114,7 @@ PLANCHER_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
     ),
     ArtkteosSensorDesc(
         key="plancher_depart",
-        name="Plancher - Température départ",
+        name="Plancher - Départ",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -129,17 +123,14 @@ PLANCHER_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
     ),
     ArtkteosSensorDesc(
         key="plancher_retour",
-        name="Plancher - Température retour",
+        name="Plancher - Retour",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.retour_plancher,
         condition_fn=lambda d: d.plancher.present,
     ),
-)
-
-# Capteurs ECS (si détecté)
-ECS_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
+    # --- Chauffe-eau ---
     ArtkteosSensorDesc(
         key="ecs_temp",
         name="Chauffe-eau - Température",
@@ -160,16 +151,32 @@ ECS_SENSORS: tuple[ArtkteosSensorDesc, ...] = (
     ),
     ArtkteosSensorDesc(
         key="ecs_relance",
-        name="Chauffe-eau - Température relance",
+        name="Chauffe-eau - Relance",
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: d.ecs.temp_relance,
         condition_fn=lambda d: d.ecs.present,
     ),
+    # --- Puissance instantanée (W) ---
+    ArtkteosSensorDesc(
+        key="puissance",
+        name="Puissance instantanée",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.puissance_w,
+    ),
+    # --- Énergie cumulée (kWh) - pour dashboard Énergie HA ---
+    ArtkteosSensorDesc(
+        key="energie",
+        name="Énergie consommée",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda d: d.energie_kwh,
+    ),
 )
-
-ALL_SENSORS = BASE_SENSORS + RADIATEUR_SENSORS + PLANCHER_SENSORS + ECS_SENSORS
 
 
 async def async_setup_entry(
@@ -178,7 +185,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     protocol: ArkteosProtocol = hass.data[DOMAIN][entry.entry_id]
-    # On crée tous les capteurs, ils se masquent si la zone n'est pas présente
     async_add_entities(
         ArtkteosSensor(protocol, entry, desc) for desc in ALL_SENSORS
     )
