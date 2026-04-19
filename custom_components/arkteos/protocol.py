@@ -1,7 +1,8 @@
-"""Arkteos REG3 protocol - V2 avec offsets identifiés."""
+"""Arkteos REG3 protocol - V3."""
 from __future__ import annotations
 import asyncio
 import logging
+import time as time_module
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -25,9 +26,6 @@ MODE_APPOINT = 4
 MODE_ECS_MARCHE = 1
 MODE_ECS_APPOINT = 2
 
-TEMP_MIN = 5.0
-TEMP_MAX = 90.0
-
 
 @dataclass
 class ZoneData:
@@ -35,9 +33,6 @@ class ZoneData:
     temp_ambiante: Optional[float] = None
     temp_consigne: Optional[float] = None
     mode: Optional[int] = None
-    derogation_active: bool = False
-    derogation_duree: int = 1
-    derogation_consigne: Optional[float] = None
 
 
 @dataclass
@@ -47,7 +42,6 @@ class ECSData:
     temp_consigne: Optional[float] = None
     temp_relance: Optional[float] = None
     mode: Optional[int] = None
-    derogation_active: bool = False
 
 
 @dataclass
@@ -55,6 +49,8 @@ class ArkteosData:
     radiateur: ZoneData = field(default_factory=ZoneData)
     plancher: ZoneData = field(default_factory=ZoneData)
     ecs: ECSData = field(default_factory=ECSData)
+
+    # Températures globales
     temp_exterieure: Optional[float] = None
     temp_retour_circuit: Optional[float] = None
     pression: Optional[float] = None
@@ -65,6 +61,16 @@ class ArkteosData:
     retour_plancher: Optional[float] = None
     mode_global: Optional[int] = None
     marche: bool = False
+
+    # Énergie - puissance instantanée en W
+    puissance_w: Optional[float] = None
+    # Énergie cumulée en kWh (total_increasing pour dashboard Énergie HA)
+    energie_kwh: float = 0.0
+
+    # Internes pour calcul énergie
+    _cpt_prev: Optional[int] = None
+    _t_prev: Optional[float] = None
+
     available: bool = False
 
 
@@ -78,18 +84,20 @@ def _s16(data: bytes, off: int) -> Optional[float]:
     return round(val, 1) if -50.0 <= val <= 150.0 else None
 
 
-def _plausible(val: Optional[float], lo=TEMP_MIN, hi=TEMP_MAX) -> bool:
+def _plausible(val: Optional[float], lo: float = 5.0, hi: float = 90.0) -> bool:
     return val is not None and lo <= val <= hi
 
 
-def decode_frame_227(data: bytes, r: ArkteosData) -> None:
+def decode_frame_227(data: bytes, r: ArkteosData, now: float) -> None:
     if len(data) < FRAME_SIZE_227:
         return
+
     r.temp_exterieure = _s16(data, 58)
     r.temp_retour_circuit = _s16(data, 110)
     r.temp_condenseur = _s16(data, 110)
     r.temp_evaporateur = _s16(data, 119)
     r.temp_refoulement = _s16(data, 142)
+
     raw_p = data[46] | (data[47] << 8)
     r.pression = round(raw_p / 10.0, 1) if 0 < raw_p < 50 else None
 
@@ -109,10 +117,30 @@ def decode_frame_227(data: bytes, r: ArkteosData) -> None:
 
     r.marche = data[8] != 0
 
+    # --- Calcul puissance & énergie via compteur off156 ---
+    # off156 : compteur 8 bits, unité = 0.1 Wh, s'incrémente de ~3 toutes les 3s
+    cpt = data[156]
+    if r._cpt_prev is not None and r._t_prev is not None:
+        delta = cpt - r._cpt_prev
+        if delta < 0:
+            delta += 256  # overflow uint8
+        dt = now - r._t_prev
+        if 0 < delta <= 20 and 1.0 <= dt <= 15.0:
+            # Puissance instantanée en W
+            r.puissance_w = round((delta * 0.1 * 3600.0) / dt, 1)
+            # Énergie cumulée en kWh (total_increasing)
+            r.energie_kwh = round(r.energie_kwh + (delta * 0.1 / 1000.0), 4)
+        elif delta == 0:
+            r.puissance_w = 0.0
+
+    r._cpt_prev = cpt
+    r._t_prev = now
+
 
 def decode_frame_163(data: bytes, r: ArkteosData) -> None:
     if len(data) < FRAME_SIZE_163:
         return
+
     r.mode_global = data[8]
 
     c_rad = _s16(data, 24)
@@ -243,12 +271,13 @@ class ArkteosProtocol:
                 if not chunk:
                     raise ConnectionResetError
                 buf += chunk
+                now = time_module.time()
                 while True:
                     frame, buf = find_frame(buf)
                     if frame is None:
                         break
                     if len(frame) == FRAME_SIZE_227:
-                        decode_frame_227(frame, self._data)
+                        decode_frame_227(frame, self._data, now)
                         self._data.available = True
                         self._notify()
                     elif len(frame) == FRAME_SIZE_163:
